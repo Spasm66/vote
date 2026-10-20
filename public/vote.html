@@ -26,7 +26,7 @@
 </main>
 <script>
 'use strict';
-const slug = location.pathname.split('/')[2];
+const slug = (location.pathname.split('/')[2] || '').toLowerCase();
 const KEY = `vag_${slug}`;
 const app = document.getElementById('app');
 

@@ -251,6 +251,28 @@ async function renderGroup(id) {
   app._parts = { linkBox, codesInfo, pollsBox };
 }
 
+function slugEditor(g) {
+  const box = h('div');
+  const prefix = g.lien.slice(0, g.lien.length - g.slug.length);
+  const input = h('input', { value: g.slug, maxlength: 60, class: 'mono', 'aria-label': 'Fin du lien', spellcheck: 'false' });
+  const form = h('form', {
+    class: 'row small',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api('POST', `/api/admin/groupes/${g.id}/lien`, { slug: input.value });
+        await refreshGroup(g.id);
+        flash(app._parts.linkBox.querySelector('.grow'), `Lien modifié : …/v/${r.slug}. L'ancien lien continue de marcher.`, 'ok');
+      } catch (err) { flash(box, err.message); }
+    },
+  },
+  h('span', { class: 'muted mono break' }, prefix),
+  h('div', { class: 'grow', style: 'flex-basis:160px' }, input),
+  h('button', { type: 'submit' }, 'Changer le lien'));
+  box.append(form);
+  return box;
+}
+
 function shareToggle(g) {
   const box = h('div');
   const cb = h('input', {
@@ -302,6 +324,7 @@ function fillGroup(g, parts) {
           h('div', { class: 'row' },
             copyBtn,
             h('a', { class: 'btn', href: `/ecran/${g.id}`, target: '_blank', rel: 'noopener' }, 'Ouvrir l\'écran de projection')),
+          slugEditor(g),
           h('div', { class: 'row small' },
             h('span', { class: 'muted' }, 'À l\'écran :'),
             h('button', {

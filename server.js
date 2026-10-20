@@ -43,11 +43,15 @@ function loadJson(file, fallback) {
 }
 
 // ---------- Configuration ----------
-let config = loadJson(CONFIG_FILE, null) || { port: 3000, adressePublique: '' };
+let config = loadJson(CONFIG_FILE, null) || { port: 3000, adressePublique: '', tunnelNomme: '' };
+if (config.tunnelNomme === undefined) config.tunnelNomme = '';
 // L'ancien mot de passe en clair des premières versions est effacé du disque.
 delete config.motDePasseAdmin;
 const PORT = Number(process.env.PORT || config.port || 3000);
 let tunnelUrl = '';
+// Mode secours : tunnel rapide avec une adresse temporaire, sans tenir compte du domaine
+// ni du tunnel nommé enregistrés dans la config (qui restent intacts pour la prochaine fois).
+const SECOURS = process.argv.includes('--tunnel-rapide');
 
 function saveConfig() {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
@@ -90,6 +94,10 @@ function index() {
   groupsById.clear(); groupsBySlug.clear(); pollsById.clear();
   for (const g of db.groupes) {
     groupsById.set(g.id, g);
+    // Les anciennes adresses d'un groupe renommé restent valables (téléphones déjà ouverts)
+    for (const old of g.anciensSlugs || []) groupsBySlug.set(old, g);
+  }
+  for (const g of db.groupes) {
     groupsBySlug.set(g.slug, g);
     for (const p of g.votes) pollsById.set(p.id, { group: g, poll: p });
   }
@@ -97,6 +105,21 @@ function index() {
 index();
 
 function nextId() { return db.prochainId++; }
+
+// « AG du 12 novembre — L3 Info » → « ag-du-12-novembre-l3-info »
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+function slugify(text) {
+  return String(text).normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/œ/gi, 'oe').replace(/æ/gi, 'ae').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    .slice(0, 50).replace(/-+$/, '');
+}
+function uniqueSlug(base, except) {
+  const root = base || 'vote';
+  let slug = root;
+  for (let i = 2; groupsBySlug.has(slug) && groupsBySlug.get(slug) !== except; i++) slug = `${root}-${i}`;
+  return slug;
+}
 
 // ---------- Version de l'état vu par les votants ----------
 // Chaque changement visible sur les téléphones (vote lancé, clos, supprimé, partage des
@@ -222,7 +245,7 @@ function requestOrigin(req) {
 }
 
 function publicBase(req) {
-  const fixed = String(config.adressePublique || '').trim().replace(/\/+$/, '');
+  const fixed = SECOURS ? '' : String(config.adressePublique || '').trim().replace(/\/+$/, '');
   if (fixed) return { base: fixed, source: 'reglage' };
   if (tunnelUrl) return { base: tunnelUrl, source: 'tunnel' };
   return { base: requestOrigin(req), source: 'navigateur' };
@@ -302,9 +325,9 @@ function groupDetail(g, req) {
 
 // ---------- API votants ----------
 async function voterApi(req, res, url) {
-  const m = url.pathname.match(/^\/api\/v\/([a-z0-9]+)\/(etat|code|vote)$/);
+  const m = url.pathname.match(/^\/api\/v\/([a-z0-9-]+)\/(etat|code|vote)$/i);
   if (!m) return fail(res, 404, 'introuvable', 'Adresse inconnue.');
-  const g = groupsBySlug.get(m[1]);
+  const g = groupsBySlug.get(m[1].toLowerCase());
   if (!g) return fail(res, 404, 'groupe_inconnu', 'Ce lien de vote n\'existe pas.');
   const action = m[2];
 
@@ -419,8 +442,7 @@ async function adminApi(req, res, url) {
       const body = await readJson(req);
       const nom = cleanText(body.nom, 80);
       if (!nom) return fail(res, 400, 'nom', 'Donnez un nom au groupe.');
-      let slug;
-      do { slug = randomString(6).toLowerCase(); } while (groupsBySlug.has(slug));
+      const slug = uniqueSlug(slugify(nom));
       const g = { id: nextId(), nom, slug, creeLe: Date.now(), codes: {}, lots: [], votes: [], ecran: 'auto', tentativesInvalides: 0 };
       db.groupes.push(g);
       index(); save();
@@ -514,6 +536,22 @@ async function adminApi(req, res, url) {
       return json(res, 200, pollView(poll, true));
     }
 
+    if (sub === '/lien' && method === 'POST') {
+      const body = await readJson(req);
+      const wanted = slugify(cleanText(body.slug, 80));
+      if (!wanted || !SLUG_RE.test(wanted)) {
+        return fail(res, 400, 'lien', 'Utilisez des lettres, des chiffres et des tirets. Exemple : ag-du-12-novembre');
+      }
+      const owner = groupsBySlug.get(wanted);
+      if (owner && owner !== g) return fail(res, 409, 'lien', 'Ce lien est déjà utilisé par un autre groupe.');
+      if (wanted !== g.slug) {
+        g.anciensSlugs = [...new Set([...(g.anciensSlugs || []), g.slug])].filter((s) => s !== wanted);
+        g.slug = wanted;
+        index(); bump(g); save();
+      }
+      return json(res, 200, { ok: true, slug: g.slug });
+    }
+
     if (sub === '/partage' && method === 'POST') {
       const body = await readJson(req);
       g.partageResultats = !!body.actif;
@@ -576,7 +614,7 @@ async function handle(req, res) {
   const p = url.pathname;
   if (req.method === 'GET') {
     if (p === '/' || p === '/admin' || p === '/admin/') return sendFile(res, 'admin.html');
-    if (/^\/v\/[a-z0-9]+\/?$/.test(p)) return sendFile(res, 'vote.html');
+    if (/^\/v\/[a-z0-9-]+\/?$/i.test(p)) return sendFile(res, 'vote.html');
     if (/^\/ecran\/\d+\/?$/.test(p)) return sendFile(res, 'ecran.html');
     if (STATIC[p]) return sendFile(res, STATIC[p][0], STATIC[p][1]);
     if (p === '/favicon.ico') return send(res, 204, '');
@@ -609,28 +647,64 @@ server.listen(PORT, () => {
   console.log(`  Administration : http://localhost:${PORT}/admin`);
   console.log(`  Mot de passe   : ${PASSWORD_SHOWN_ONCE}`);
   console.log('                   (nouveau à chaque lancement, enregistré nulle part : notez-le)');
-  if (config.adressePublique) console.log(`  Adresse publique : ${config.adressePublique}`);
+  if (SECOURS) console.log('  Mode secours : adresse temporaire (le domaine enregistré n\'est pas utilisé).');
+  else if (config.adressePublique) console.log(`  Adresse publique : ${config.adressePublique}`);
+  if (config.tunnelNomme && !SECOURS && !process.argv.includes('--tunnel')) {
+    console.log('  (le tunnel n\'est pas lancé : utilisez demarrer-avec-tunnel.bat pour que le site soit accessible)');
+  }
   console.log('  Laissez cette fenêtre ouverte pendant toute l\'AG. Ctrl+C pour arrêter.');
   console.log('');
-  if (process.argv.includes('--tunnel')) startTunnel();
+  if (SECOURS || process.argv.includes('--tunnel')) startTunnel();
 });
 
+// Tunnel Cloudflare lancé par le serveur lui-même :
+//  - tunnel nommé si "tunnelNomme" est renseigné dans donnees/config.json (adresse fixe),
+//  - sinon tunnel rapide trycloudflare.com (adresse qui change à chaque lancement).
+// S'il s'arrête, il est relancé automatiquement.
+let tunnelChild = null;
+let stopping = false;
+process.on('exit', () => { stopping = true; try { if (tunnelChild) tunnelChild.kill(); } catch { /* déjà arrêté */ } });
+
 function startTunnel() {
-  console.log('  Démarrage du tunnel Cloudflare…');
+  const name = SECOURS ? '' : String(config.tunnelNomme || '').trim();
+  const local = `http://localhost:${PORT}`;
+  const args = name
+    ? ['tunnel', '--no-autoupdate', 'run', '--url', local, name]
+    : ['tunnel', '--no-autoupdate', '--url', local];
+  console.log(name ? `  Démarrage du tunnel Cloudflare « ${name} »…` : '  Démarrage du tunnel Cloudflare rapide…');
+
   let child;
   try {
-    child = spawn('cloudflared', ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn('cloudflared', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
     console.error('  Impossible de lancer cloudflared :', e.message);
     return;
   }
+  tunnelChild = child;
+  let connected = false;
+  let notFound = false;
+  let buffer = '';
+
   const onData = (buf) => {
-    const s = buf.toString();
-    for (const match of s.matchAll(/https:\/\/([a-z0-9-]+)\.trycloudflare\.com/g)) {
-      if (match[1] === 'api' || tunnelUrl) continue;
-      tunnelUrl = match[0];
-      console.log(`\n  Adresse publique (tunnel) : ${tunnelUrl}`);
-      console.log('  Elle change à chaque lancement : le lien et le QR code dans l\'admin sont mis à jour tout seuls.\n');
+    buffer += buf.toString();
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop();
+    for (const line of lines) {
+      if (!name) {
+        const m = line.match(/https:\/\/([a-z0-9-]+)\.trycloudflare\.com/);
+        if (m && m[1] !== 'api' && !tunnelUrl) {
+          tunnelUrl = m[0];
+          console.log(`\n  Adresse publique (tunnel rapide) : ${tunnelUrl}`);
+          console.log('  Elle change à chaque lancement : le lien et le QR code dans l\'admin sont mis à jour tout seuls.\n');
+        }
+      } else if (/Registered tunnel connection/.test(line) && !connected) {
+        connected = true;
+        const adr = config.adressePublique || '(renseignez l\'adresse publique dans l\'admin)';
+        console.log(`\n  Tunnel « ${name} » connecté. Le site est en ligne : ${adr}\n`);
+      }
+      if (/neither the ID nor the name/.test(line)) notFound = true;
+      // On n'affiche que les vraies erreurs de cloudflared, pas son bavardage habituel
+      if (/\bERR\b/.test(line)) console.error(`  [tunnel] ${line.replace(/^\S+\s+ERR\s*/, '')}`);
     }
   };
   child.stdout.on('data', onData);
@@ -640,11 +714,21 @@ function startTunnel() {
       console.error('\n  cloudflared est introuvable. Installez-le avec :');
       console.error('    winget install --id Cloudflare.cloudflared');
       console.error('  puis fermez et rouvrez la fenêtre.\n');
+      stopping = true; // inutile de réessayer
     } else console.error('  Erreur du tunnel :', e.message);
   });
   child.on('exit', (code) => {
-    if (tunnelUrl) console.error(`\n  ATTENTION : le tunnel s'est arrêté (code ${code}). Le site n'est plus accessible de l'extérieur.\n`);
     tunnelUrl = '';
+    tunnelChild = null;
+    if (stopping) return;
+    if (notFound) {
+      console.error(`\n  Le tunnel « ${name} » n'existe pas sur votre compte Cloudflare.`);
+      console.error(`  Créez-le avec :  cloudflared tunnel create ${name}`);
+      console.error('  ou corrigez "tunnelNomme" dans donnees/config.json, puis relancez.\n');
+      return;
+    }
+    console.error(`\n  ATTENTION : le tunnel s'est arrêté (code ${code}). Le site n'est plus accessible de l'extérieur.`);
+    console.error('  Nouvelle tentative dans 5 secondes…\n');
+    setTimeout(startTunnel, 5000);
   });
-  process.on('exit', () => { try { child.kill(); } catch { /* déjà arrêté */ } });
 }

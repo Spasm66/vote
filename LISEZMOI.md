@@ -16,8 +16,11 @@ Fermez puis rouvrez le terminal après l'installation.
 
 ## 2. Lancer le serveur
 
-- **Pour tester seul sur le PC** : double-cliquez sur `demarrer.bat`.
-- **Pour l'AG (accessible depuis les téléphones)** : double-cliquez sur `demarrer-avec-tunnel.bat`.
+- **Pour l'AG, avec le domaine** (adresse fixe) : `demarrer-domaine.bat`.
+- **Solution de secours** (si le domaine ou le tunnel nommé ne marche pas) : `demarrer-avec-tunnel.bat`.
+  Il crée une nouvelle adresse temporaire `https://…trycloudflare.com` à chaque lancement, sans rien
+  dépendre du domaine. Le lien et le QR code de l'admin se mettent à jour tout seuls : re-projetez le QR code.
+- **Pour tester seul sur le PC** (pas accessible depuis les téléphones) : `demarrer.bat`.
 
 La page d'administration s'ouvre toute seule (`http://localhost:3000/admin`).
 Le **mot de passe admin** s'affiche dans la fenêtre noire (ex. `K7P2-XM9Q-H4TR-WB3N`, tirets facultatifs).
@@ -72,8 +75,10 @@ cloudflared tunnel route dns vote vote.monsite.fr
 cloudflared tunnel run --url http://localhost:3000 vote
 ```
 
-Puis dans l'admin, page d'accueil, renseignez l'adresse publique `https://vote.monsite.fr`.
-Lancez alors `demarrer.bat` (sans tunnel rapide) et la commande `cloudflared tunnel run` dans une autre fenêtre.
+Puis dans `donnees/config.json`, renseignez `"adressePublique": "https://vote.monsite.fr"` et
+`"tunnelNomme": "vote"` (serveur arrêté). Lancez alors `demarrer-domaine.bat` (ou `demarrer-avec-tunnel.bat`,
+c'est la même chose) : le serveur démarre lui-même le tunnel nommé, affiche « Tunnel connecté »
+dans sa fenêtre, et le relance tout seul s'il se coupe.
 
 ## 6. Tester avant le jour J
 
