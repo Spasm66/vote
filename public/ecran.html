@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Écran de projection</title>
+<style>
+  /* Toujours noir sur blanc : c'est ce qui se lit le mieux au vidéoprojecteur */
+  html, body { margin: 0; height: 100%; background: #fff; color: #111; }
+  body { font: 2.2vh/1.35 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  #app { height: 100%; padding: 4vh 5vw; box-sizing: border-box; display: flex; flex-direction: column; }
+  .titre { font-size: 3.2vh; color: #555; margin: 0 0 2vh; }
+  .center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  .qr-big { width: min(62vh, 80vw); height: min(62vh, 80vw); }
+  .qr-big svg, .qr-mini svg { width: 100%; height: 100%; display: block; }
+  .lien { font: 600 3.4vh/1.3 ui-monospace, Consolas, "Courier New", monospace; margin-top: 2.5vh; word-break: break-all; }
+  .consigne { font-size: 3vh; color: #444; margin-top: 1.5vh; }
+  .question { font-size: 5.2vh; font-weight: 700; margin: 0 0 4vh; line-height: 1.2; }
+  .layout { flex: 1; display: flex; gap: 4vw; align-items: flex-start; min-height: 0; }
+  .main { flex: 1; min-width: 0; }
+  .side { width: 24vh; text-align: center; font-size: 1.9vh; color: #444; }
+  .qr-mini { width: 24vh; height: 24vh; }
+  .opt { font-size: 3.8vh; padding: 1.4vh 0; border-bottom: 1px solid #ddd; }
+  .count { font-size: 4vh; margin-top: 4vh; }
+  .res { margin: 0 0 2.6vh; }
+  .res-head { display: flex; justify-content: space-between; gap: 2vw; font-size: 3.8vh; }
+  .bar { height: 2.6vh; background: #e6e6e6; margin-top: .8vh; }
+  .bar span { display: block; height: 100%; background: #222; }
+  .badge { display: inline-block; font-size: 2.4vh; padding: .4vh 1.2vw; border: 2px solid #111; border-radius: 99px; margin-bottom: 2vh; }
+  .err { color: #b00020; font-size: 3vh; }
+  #fs { position: fixed; right: 12px; bottom: 12px; font: 14px system-ui, sans-serif; padding: 6px 10px;
+        background: #fff; border: 1px solid #ccc; border-radius: 6px; cursor: pointer; opacity: .6; }
+  #fs:hover { opacity: 1; }
+  :fullscreen #fs { display: none; }
+</style>
+<script src="/qr.js"></script>
+</head>
+<body>
+<div id="app"><p>Chargement…</p></div>
+<button id="fs" type="button">Plein écran (F)</button>
+<script>
+'use strict';
+const id = location.pathname.split('/')[2];
+const app = document.getElementById('app');
+let lastKey = '';
+let qrCache = { link: '', svg: '' };
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === 'class') el.className = v; else if (k === 'style') el.setAttribute('style', v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+function qr(link, cls) {
+  if (qrCache.link !== link) qrCache = { link, svg: QR.toSvg(link, { ecl: 1, border: 2 }) };
+  const el = h('div', { class: cls });
+  el.innerHTML = qrCache.svg;
+  return el;
+}
+
+function render(d) {
+  const key = JSON.stringify(d);
+  if (key === lastKey) return;
+  lastKey = key;
+  document.title = `Écran — ${d.nom}`;
+  const v = d.vote;
+
+  if (!v) {
+    app.replaceChildren(
+      h('p', { class: 'titre' }, d.nom),
+      h('div', { class: 'center' },
+        qr(d.lien, 'qr-big'),
+        h('div', { class: 'lien' }, d.lien),
+        h('div', { class: 'consigne' }, 'Scannez le QR code, puis entrez le code de votre papier.')));
+    return;
+  }
+
+  if (v.statut === 'ouvert') {
+    app.replaceChildren(
+      h('p', { class: 'titre' }, d.nom),
+      h('div', { class: 'layout' },
+        h('div', { class: 'main' },
+          h('span', { class: 'badge' }, 'Vote en cours'),
+          h('p', { class: 'question' }, v.question),
+          v.options.map((o) => h('div', { class: 'opt' }, o)),
+          h('p', { class: 'count' }, `${v.nbVotes} vote${v.nbVotes > 1 ? 's' : ''} reçu${v.nbVotes > 1 ? 's' : ''}`)),
+        h('div', { class: 'side' }, qr(d.lien, 'qr-mini'), h('p', null, 'Pas encore connecté ? Scannez.'))));
+    return;
+  }
+
+  const total = v.nbVotes;
+  app.replaceChildren(
+    h('p', { class: 'titre' }, d.nom),
+    h('div', { class: 'main' },
+      h('span', { class: 'badge' }, 'Résultats'),
+      h('p', { class: 'question' }, v.question),
+      v.options.map((o, i) => {
+        const n = v.resultats[i];
+        const pct = total ? Math.round((n / total) * 1000) / 10 : 0;
+        return h('div', { class: 'res' },
+          h('div', { class: 'res-head' }, h('span', null, o), h('strong', null, `${n} · ${pct} %`)),
+          h('div', { class: 'bar' }, h('span', { style: `width:${pct}%` })));
+      }),
+      h('p', { class: 'count' }, `${total} vote${total > 1 ? 's' : ''} exprimé${total > 1 ? 's' : ''}`)));
+}
+
+async function tick() {
+  try {
+    const r = await fetch(`/api/admin/groupes/${id}/ecran`, { cache: 'no-store', credentials: 'same-origin' });
+    if (r.status === 401) {
+      lastKey = '';
+      app.replaceChildren(h('div', { class: 'center' }, h('p', { class: 'err' }, 'Connectez-vous d\'abord à l\'administration dans ce navigateur, puis rechargez la page.')));
+    } else if (r.ok) {
+      render(await r.json());
+    }
+  } catch { /* on réessaie au prochain tour */ }
+  setTimeout(tick, 1500);
+}
+
+function toggleFs() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+document.getElementById('fs').addEventListener('click', toggleFs);
+document.addEventListener('keydown', (e) => { if (e.key === 'f' || e.key === 'F') toggleFs(); });
+tick();
+</script>
+</body>
+</html>

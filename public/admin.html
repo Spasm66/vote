@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vote AG — Administration</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main id="app"><p class="muted">Chargement…</p></main>
+<script src="/qr.js"></script>
+<script>
+'use strict';
+const app = document.getElementById('app');
+let refreshTimer = null;
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'class') el.className = v;
+    else if (k === 'value') el.value = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+async function api(method, url, body) {
+  const r = await fetch(url, {
+    method, credentials: 'same-origin',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try { data = await r.json(); } catch { /* réponse vide */ }
+  if (r.status === 401) { showLogin(); throw new Error('Connexion requise'); }
+  if (!r.ok) throw new Error(data.erreur || `Erreur ${r.status}`);
+  return data;
+}
+
+function flash(container, text, kind = 'err') {
+  const old = container.querySelector(':scope > .msg');
+  if (old) old.remove();
+  if (!text) return;
+  const el = h('div', { class: `msg ${kind}` }, text);
+  container.prepend(el);
+  if (kind === 'ok') setTimeout(() => el.remove(), 3000);
+}
+
+function stopRefresh() { clearInterval(refreshTimer); refreshTimer = null; }
+
+function fmtDate(t) {
+  return t ? new Date(t).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+}
+
+function isLocalLink(link) {
+  try {
+    const host = new URL(link).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' ||
+      /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+  } catch { return true; }
+}
+
+// ---------- Connexion ----------
+function showLogin() {
+  stopRefresh();
+  const input = h('input', { type: 'password', id: 'mdp', autocomplete: 'current-password', required: true });
+  const box = h('div');
+  const form = h('form', {
+    class: 'card stack',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        await api('POST', '/api/admin/connexion', { motDePasse: input.value });
+        render();
+      } catch (err) { flash(box, err.message); }
+    },
+  },
+  h('div', null, h('label', { for: 'mdp' }, 'Mot de passe administrateur'), input),
+  h('p', { class: 'muted small' }, 'Il s\'affiche dans la fenêtre noire du serveur, et change à chaque lancement. Les tirets sont facultatifs.'),
+  h('button', { class: 'primary', type: 'submit' }, 'Se connecter'));
+  box.append(form);
+  app.replaceChildren(h('h1', null, 'Vote AG — Administration'), box);
+  input.focus();
+}
+
+// ---------- Accueil ----------
+async function renderHome() {
+  const [groupes, reglages] = await Promise.all([api('GET', '/api/admin/groupes'), api('GET', '/api/admin/reglages')]);
+
+  const list = h('div');
+  if (!groupes.length) list.append(h('p', { class: 'muted' }, 'Aucun groupe pour l\'instant.'));
+  for (const g of groupes) {
+    list.append(h('a', { class: 'card', href: `#/groupe/${g.id}`, style: 'display:block;text-decoration:none;color:inherit' },
+      h('strong', null, g.nom), ' ',
+      g.voteOuvert ? h('span', { class: 'badge ouvert' }, 'vote en cours') : null,
+      h('div', { class: 'muted small' }, `${g.nbCodes} codes · ${g.nbVotes} vote(s)`)));
+  }
+
+  const nom = h('input', { placeholder: 'Ex. : AG du 12 novembre', maxlength: 80, required: true });
+  const createBox = h('div');
+  const createForm = h('form', {
+    class: 'row',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const g = await api('POST', '/api/admin/groupes', { nom: nom.value });
+        location.hash = `#/groupe/${g.id}`;
+      } catch (err) { flash(createBox, err.message); }
+    },
+  }, h('div', { class: 'grow' }, nom), h('button', { class: 'primary', type: 'submit' }, 'Créer le groupe'));
+  createBox.append(createForm);
+
+  const adr = h('input', { value: reglages.adressePublique, placeholder: 'https://vote.monsite.fr (laisser vide si tunnel)' });
+  const setBox = h('div');
+  const sourceTxt = {
+    reglage: 'l\'adresse saisie ci-dessous',
+    tunnel: 'l\'adresse du tunnel Cloudflare',
+    navigateur: 'l\'adresse de cette page',
+  }[reglages.source];
+  setBox.append(
+    h('p', null, 'Lien utilisé pour les votants : ', h('span', { class: 'mono break' }, reglages.base), h('br'),
+      h('span', { class: 'muted small' }, `(d'après ${sourceTxt})`)),
+    isLocalLink(reglages.base)
+      ? h('p', { class: 'warn small' }, 'Cette adresse ne marche que sur ce PC. Lancez le serveur avec demarrer-avec-tunnel.bat, ou saisissez l\'adresse de votre tunnel nommé.')
+      : null,
+    h('form', {
+      class: 'row',
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try { await api('POST', '/api/admin/reglages', { adressePublique: adr.value }); render(); }
+        catch (err) { flash(setBox, err.message); }
+      },
+    }, h('div', { class: 'grow' }, adr), h('button', { type: 'submit' }, 'Enregistrer')));
+
+  app.replaceChildren(
+    h('div', { class: 'row', style: 'justify-content:space-between' },
+      h('h1', null, 'Vote AG — Administration'),
+      h('button', { onclick: async () => { await api('POST', '/api/admin/deconnexion'); showLogin(); } }, 'Se déconnecter')),
+    h('h2', null, 'Groupes de votants'), list,
+    h('h3', { style: 'margin-top:16px' }, 'Nouveau groupe'), createBox,
+    h('h2', null, 'Adresse publique du site'), setBox);
+}
+
+// ---------- Groupe ----------
+let currentGroup = null;
+
+async function renderGroup(id) {
+  const g = await api('GET', `/api/admin/groupes/${id}`);
+  currentGroup = g;
+
+  const linkBox = h('div');
+  const codesInfo = h('div');
+  const pollsBox = h('div');
+
+  // Génération de codes
+  const nombre = h('input', { type: 'number', min: 1, max: 5000, value: 100, style: 'width:120px' });
+  const genBox = h('div');
+  const genForm = h('form', {
+    class: 'row',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const btn = genForm.querySelector('button');
+      btn.disabled = true;
+      try {
+        const r = await api('POST', `/api/admin/groupes/${id}/codes`, { nombre: Number(nombre.value) });
+        flash(genBox, `Lot ${r.lot} créé. Vous pouvez l'imprimer ci-dessous.`, 'ok');
+        await refreshGroup(id);
+      } catch (err) { flash(genBox, err.message); }
+      btn.disabled = false;
+    },
+  }, h('label', { style: 'margin:0;color:inherit' }, 'Générer'), nombre, h('span', null, 'codes'), h('button', { class: 'primary', type: 'submit' }, 'Générer'));
+  genBox.append(genForm);
+
+  const offInput = h('input', { placeholder: 'Code à désactiver', class: 'mono', maxlength: 12 });
+  const offBox = h('div');
+  const offForm = h('form', {
+    class: 'row',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        await api('POST', `/api/admin/groupes/${id}/codes/desactiver`, { code: offInput.value });
+        flash(offBox, `Code ${offInput.value.toUpperCase()} désactivé.`, 'ok');
+        offInput.value = '';
+        await refreshGroup(id);
+      } catch (err) { flash(offBox, err.message); }
+    },
+  }, h('div', { class: 'grow' }, offInput), h('button', { type: 'submit' }, 'Désactiver'));
+  offBox.append(offForm,
+    h('p', { class: 'muted small' }, 'Pour un code perdu ou rendu par quelqu\'un qui part. Il ne pourra plus voter (ses votes déjà faits restent comptés).'));
+
+  // Création d'un vote
+  const question = h('textarea', { placeholder: 'Ex. : Approuvez-vous le blocage du campus le 14 novembre ?', maxlength: 300 });
+  const optionsList = h('div', { class: 'stack' });
+  const addOption = (value = '') => {
+    const input = h('input', { value, maxlength: 120, placeholder: `Réponse ${optionsList.children.length + 1}` });
+    const row = h('div', { class: 'row' }, h('div', { class: 'grow' }, input),
+      h('button', { type: 'button', title: 'Retirer', onclick: () => row.remove() }, '×'));
+    optionsList.append(row);
+    return input;
+  };
+  const setOptions = (values) => { optionsList.replaceChildren(); values.forEach((v) => addOption(v)); };
+  setOptions(['Pour', 'Contre', 'Abstention']);
+  const pollFormBox = h('div');
+  const submitPoll = async (lancer) => {
+    const options = [...optionsList.querySelectorAll('input')].map((i) => i.value.trim()).filter(Boolean);
+    try {
+      await api('POST', `/api/admin/groupes/${id}/votes`, { question: question.value, options, lancer });
+      question.value = '';
+      setOptions(['Pour', 'Contre', 'Abstention']);
+      flash(pollFormBox, lancer ? 'Vote lancé : il apparaît maintenant sur les téléphones.' : 'Vote enregistré, prêt à être lancé.', 'ok');
+      await refreshGroup(id);
+    } catch (err) { flash(pollFormBox, err.message); }
+  };
+  pollFormBox.append(h('div', { class: 'card stack' },
+    h('div', null, h('label', null, 'Question'), question),
+    h('div', null, h('label', null, 'Réponses proposées'), optionsList),
+    h('div', { class: 'row' },
+      h('button', { type: 'button', onclick: () => addOption().focus() }, '+ Ajouter une réponse'),
+      h('button', { type: 'button', onclick: () => setOptions(['Pour', 'Contre', 'Abstention']) }, 'Pour / Contre / Abstention'),
+      h('button', { type: 'button', onclick: () => setOptions(['', '']) }, 'Vider')),
+    h('div', { class: 'row', style: 'margin-top:14px' },
+      h('button', { class: 'primary', type: 'button', onclick: () => submitPoll(true) }, 'Lancer le vote maintenant'),
+      h('button', { type: 'button', onclick: () => submitPoll(false) }, 'Enregistrer pour plus tard'))));
+
+  app.replaceChildren(
+    h('p', null, h('a', { href: '#/' }, '← Tous les groupes')),
+    h('h1', { id: 'groupTitle' }, g.nom),
+    h('h2', null, 'Lien et QR code pour les votants'), linkBox,
+    h('h2', null, 'Codes de vote'), codesInfo, genBox, offBox,
+    h('h2', null, 'Nouveau vote'), pollFormBox,
+    h('h2', null, 'Votes'), shareToggle(g), pollsBox,
+    h('h2', null, 'Zone dangereuse'),
+    h('button', {
+      class: 'danger',
+      onclick: async () => {
+        if (!confirm(`Supprimer définitivement le groupe « ${g.nom} », ses codes et tous ses résultats ?`)) return;
+        await api('DELETE', `/api/admin/groupes/${id}`);
+        location.hash = '#/';
+      },
+    }, 'Supprimer ce groupe'));
+
+  fillGroup(g, { linkBox, codesInfo, pollsBox });
+  stopRefresh();
+  refreshTimer = setInterval(() => refreshGroup(id).catch(() => {}), 2000);
+  app._parts = { linkBox, codesInfo, pollsBox };
+}
+
+function shareToggle(g) {
+  const box = h('div');
+  const cb = h('input', {
+    type: 'checkbox', id: 'partage', style: 'width:auto;margin:0',
+    onchange: async () => {
+      try {
+        await api('POST', `/api/admin/groupes/${g.id}/partage`, { actif: cb.checked });
+        flash(box, cb.checked ? 'Les résultats seront affichés sur les téléphones à la clôture.' : 'Les résultats ne seront plus affichés sur les téléphones.', 'ok');
+      } catch (err) { cb.checked = !cb.checked; flash(box, err.message); }
+    },
+  });
+  cb.checked = g.partageResultats;
+  box.append(h('div', { class: 'row' }, cb,
+    h('label', { for: 'partage', style: 'margin:0;color:inherit' }, 'Afficher les résultats sur les téléphones quand un vote est clôturé')));
+  return box;
+}
+
+async function refreshGroup(id) {
+  if (location.hash !== `#/groupe/${id}`) return stopRefresh();
+  const g = await api('GET', `/api/admin/groupes/${id}`);
+  currentGroup = g;
+  fillGroup(g, app._parts);
+}
+
+let lastLink = '', lastPollsKey = '', lastCodesKey = '', lastScreen = '';
+
+function fillGroup(g, parts) {
+  if (!parts) return;
+  // Lien + QR
+  if (g.lien !== lastLink || g.ecran !== lastScreen) {
+    lastLink = g.lien; lastScreen = g.ecran;
+    const qr = h('div', { class: 'qr-small' });
+    qr.innerHTML = QR.toSvg(g.lien, { ecl: 1, border: 2 });
+    const copyBtn = h('button', {
+      type: 'button',
+      onclick: async () => {
+        try { await navigator.clipboard.writeText(g.lien); copyBtn.textContent = 'Copié ✓'; }
+        catch { prompt('Copiez le lien :', g.lien); }
+        setTimeout(() => { copyBtn.textContent = 'Copier le lien'; }, 2000);
+      },
+    }, 'Copier le lien');
+    parts.linkBox.replaceChildren(
+      h('div', { class: 'row', style: 'align-items:flex-start' }, qr,
+        h('div', { class: 'grow stack' },
+          h('p', { class: 'mono break', style: 'margin:0' }, g.lien),
+          isLocalLink(g.lien)
+            ? h('p', { class: 'warn small' }, 'Ce lien ne marche que sur ce PC : lancez le tunnel, ou renseignez l\'adresse publique sur la page d\'accueil.')
+            : null,
+          h('div', { class: 'row' },
+            copyBtn,
+            h('a', { class: 'btn', href: `/ecran/${g.id}`, target: '_blank', rel: 'noopener' }, 'Ouvrir l\'écran de projection')),
+          h('div', { class: 'row small' },
+            h('span', { class: 'muted' }, 'À l\'écran :'),
+            h('button', {
+              type: 'button', class: g.ecran === 'auto' ? 'primary' : '',
+              onclick: () => api('POST', `/api/admin/groupes/${g.id}/ecran`, { mode: 'auto' }).then(() => refreshGroup(g.id)),
+            }, 'Vote en cours / résultats'),
+            h('button', {
+              type: 'button', class: g.ecran === 'qr' ? 'primary' : '',
+              onclick: () => api('POST', `/api/admin/groupes/${g.id}/ecran`, { mode: 'qr' }).then(() => refreshGroup(g.id)),
+            }, 'QR code seul')))));
+  }
+
+  // Codes
+  const codesKey = JSON.stringify([g.nbCodes, g.nbDesactives, g.lots, g.tentativesInvalides]);
+  if (codesKey !== lastCodesKey) {
+    lastCodesKey = codesKey;
+    const lots = g.lots.map((l) => h('div', { class: 'row', style: 'justify-content:space-between;border-top:1px solid var(--line);padding:6px 0' },
+      h('span', null, `Lot ${l.numero} · ${l.nombre} codes · ${fmtDate(l.creeLe)}`),
+      h('a', { class: 'btn', href: `/api/admin/groupes/${g.id}/codes.pdf?lot=${l.numero}`, target: '_blank' }, 'PDF à imprimer')));
+    parts.codesInfo.replaceChildren(
+      h('p', null, h('strong', null, g.nbCodes), ' codes au total',
+        g.nbDesactives ? `, dont ${g.nbDesactives} désactivé(s)` : '',
+        g.tentativesInvalides ? h('span', { class: 'muted small' }, ` · ${g.tentativesInvalides} saisie(s) de code erronée(s)`) : ''),
+      lots.length ? h('div', { class: 'card' }, lots,
+        h('div', { class: 'row', style: 'border-top:1px solid var(--line);padding-top:8px' },
+          h('a', { class: 'btn', href: `/api/admin/groupes/${g.id}/codes.pdf`, target: '_blank' }, 'PDF de tous les codes'),
+          h('a', { class: 'btn', href: `/api/admin/groupes/${g.id}/codes.txt` }, 'Liste en texte (sauvegarde)'))) : null,
+      h('p', { class: 'muted small' }, '312 codes par page A4, en police 12. Découpez, mettez les papiers dans une boîte, et faites piocher un papier par personne à l\'émargement (deux pour une procuration).'));
+  }
+
+  // Votes
+  const pollsKey = JSON.stringify(g.votes);
+  if (pollsKey !== lastPollsKey) {
+    lastPollsKey = pollsKey;
+    const open = g.votes.some((v) => v.statut === 'ouvert');
+    if (!g.votes.length) {
+      parts.pollsBox.replaceChildren(h('p', { class: 'muted' }, 'Aucun vote pour l\'instant.'));
+    } else {
+      parts.pollsBox.replaceChildren(...g.votes.map((v) => pollCard(v, g, open)));
+    }
+  }
+}
+
+function pollCard(v, g, anotherOpen) {
+  const label = { ouvert: 'en cours', brouillon: 'prêt à lancer', clos: 'clos' }[v.statut];
+  const total = v.nbVotes;
+  const showResults = v.statut !== 'brouillon';
+  const rows = v.options.map((o, i) => {
+    if (!showResults) return h('li', null, o);
+    const n = v.resultats[i];
+    const pct = total ? Math.round((n / total) * 1000) / 10 : 0;
+    return h('div', null,
+      h('div', { class: 'row', style: 'justify-content:space-between' }, h('span', null, o), h('strong', null, `${n} (${pct} %)`)),
+      h('div', { class: 'bar' }, h('span', { style: `width:${pct}%` })));
+  });
+  const box = h('div', { class: 'card' });
+  const act = async (action, confirmText) => {
+    if (confirmText && !confirm(confirmText)) return;
+    try { await api('POST', `/api/admin/votes/${v.id}/${action}`); await refreshGroup(g.id); }
+    catch (err) { flash(box, err.message); }
+  };
+  box.append(
+    h('div', { class: 'row', style: 'justify-content:space-between' },
+      h('span', { class: `badge ${v.statut}` }, label),
+      h('span', { class: 'muted small' }, v.statut === 'clos' ? `clos le ${fmtDate(v.closLe)}` : v.statut === 'ouvert' ? `ouvert le ${fmtDate(v.ouvertLe)}` : '')),
+    h('h3', { style: 'margin-top:8px' }, v.question),
+    showResults ? h('div', null, rows) : h('ul', null, rows),
+    showResults ? h('p', null, h('strong', null, total), ` vote(s) sur ${g.nbCodes - g.nbDesactives} code(s) actifs`) : null,
+    h('div', { class: 'row' },
+      v.statut === 'brouillon' ? h('button', { class: 'primary', disabled: anotherOpen, title: anotherOpen ? 'Un autre vote est en cours' : null, onclick: () => act('ouvrir') }, 'Lancer') : null,
+      v.statut === 'ouvert' ? h('button', { class: 'primary', onclick: () => act('clore', 'Clôturer ce vote ? Plus personne ne pourra voter.') }, 'Clôturer le vote') : null,
+      v.statut !== 'ouvert' ? h('button', { class: 'danger', onclick: () => act('supprimer', 'Supprimer ce vote et ses résultats ?') }, 'Supprimer') : null));
+  return box;
+}
+
+// ---------- Navigation ----------
+async function render() {
+  stopRefresh();
+  lastLink = lastPollsKey = lastCodesKey = lastScreen = '';
+  const m = location.hash.match(/^#\/groupe\/(\d+)$/);
+  try {
+    if (m) await renderGroup(Number(m[1]));
+    else await renderHome();
+  } catch (err) {
+    if (err.message !== 'Connexion requise') {
+      app.replaceChildren(h('p', { class: 'msg err' }, err.message), h('p', null, h('a', { href: '#/' }, '← Retour')));
+    }
+  }
+}
+window.addEventListener('hashchange', render);
+render();
+</script>
+</body>
+</html>

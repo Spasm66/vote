@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Vote</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  main { max-width: 520px; }
+  .choice { display: block; width: 100%; text-align: left; padding: 16px; margin: 10px 0; font-size: 1.1rem; }
+  .code-input { font-size: 1.6rem; letter-spacing: .15em; text-align: center; text-transform: uppercase; }
+  .big { font-size: 1.25rem; }
+  .question { font-size: 1.3rem; font-weight: 600; margin: 16px 0; }
+  footer { margin-top: 36px; border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="titre">Vote</h1>
+  <div id="app"><p class="muted">Chargement…</p></div>
+  <footer id="pied" hidden>
+    <p class="small muted" id="codeInfo"></p>
+    <button class="link small" id="changer" type="button">Utiliser un autre code (procuration)</button>
+  </footer>
+</main>
+<script>
+'use strict';
+const slug = location.pathname.split('/')[2];
+const KEY = `vag_${slug}`;
+const app = document.getElementById('app');
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'class') el.className = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+// Mémoire locale du téléphone (le code et les votes déjà faits, jamais le choix)
+function load() {
+  try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; }
+}
+function persist() {
+  try { localStorage.setItem(KEY, JSON.stringify({ code: st.code, faits: st.faits })); } catch { /* navigation privée */ }
+}
+
+const saved = load();
+const st = {
+  code: saved.code || '',
+  faits: Array.isArray(saved.faits) ? saved.faits : [],
+  etat: null,          // { rev, groupe, vote, resultat }
+  rev: null,           // version reçue : le serveur répond 204 tant qu'elle ne change pas
+  choix: null,         // index choisi, en attente de confirmation
+  envoi: false,
+  message: null,       // { text, kind }
+  horsLigne: false,
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function call(method, url, body) {
+  const r = await fetch(url, {
+    method, cache: 'no-store',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try { data = await r.json(); } catch { /* vide */ }
+  return { status: r.status, data };
+}
+
+// ---------- Mise à jour de l'état ----------
+let pollTimer = null;
+async function refresh() {
+  clearTimeout(pollTimer);
+  try {
+    const { status, data } = await call('GET', `/api/v/${slug}/etat${st.rev ? `?rev=${st.rev}` : ''}`);
+    if (status === 404) { st.etat = null; st.introuvable = true; render(); return; }
+    if (status === 204) {
+      // Rien n'a changé depuis la dernière fois
+      if (st.horsLigne) { st.horsLigne = false; render(); }
+    } else if (status === 200) {
+      const prevId = st.etat && st.etat.vote && st.etat.vote.id;
+      st.etat = data;
+      st.rev = data.rev;
+      st.horsLigne = false;
+      const newId = data.vote && data.vote.id;
+      if (newId !== prevId) { st.choix = null; st.message = null; }
+      render();
+    } else {
+      st.horsLigne = true; render();
+    }
+  } catch {
+    st.horsLigne = true; render();
+  }
+  const base = document.hidden ? 10000 : (st.horsLigne ? 6000 : 4000);
+  pollTimer = setTimeout(refresh, base + Math.random() * 1500);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+
+// ---------- Actions ----------
+async function submitCode(value) {
+  const code = String(value).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length !== 8) { st.message = { text: 'Le code fait 8 caractères.', kind: 'err' }; render(); return; }
+  st.envoi = true; st.message = null; render();
+  try {
+    const { status, data } = await call('POST', `/api/v/${slug}/code`, { code });
+    if (status === 200) {
+      st.code = code;
+      for (const id of data.dejaVotes || []) if (!st.faits.includes(id)) st.faits.push(id);
+      persist();
+    } else {
+      st.message = { text: data.erreur || 'Erreur, réessayez.', kind: 'err' };
+    }
+  } catch {
+    st.message = { text: 'Pas de connexion. Vérifiez votre réseau et réessayez.', kind: 'err' };
+  }
+  st.envoi = false;
+  render();
+}
+
+async function submitVote() {
+  const vote = st.etat.vote;
+  const choix = st.choix;
+  const jeton = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  st.envoi = true; render();
+  const waits = [0, 1000, 2000, 3000, 5000, 8000, 8000];
+  let result = null;
+  for (const wait of waits) {
+    if (wait) await sleep(wait + Math.random() * 500);
+    try {
+      const r = await call('POST', `/api/v/${slug}/vote`, { code: st.code, vote: vote.id, choix, jeton });
+      // Tunnel ou serveur saturé (429 sans code, 5xx) : on réessaie avec le même jeton
+      if (r.status >= 500 || (r.status === 429 && r.data.code !== 'trop_de_tentatives')) continue;
+      result = r;
+      break;
+    } catch { /* coupure réseau : on réessaie avec le même jeton */ }
+  }
+  st.envoi = false;
+  st.choix = null;
+  if (!result) {
+    st.message = { text: 'Le vote n\'a pas pu être envoyé (réseau). Réessayez.', kind: 'err' };
+  } else if (result.status === 200) {
+    st.faits.push(vote.id); persist();
+    st.message = { text: 'Votre vote est enregistré.', kind: 'ok' };
+  } else if (result.data.code === 'deja_vote') {
+    st.faits.push(vote.id); persist();
+    st.message = { text: 'Ce code a déjà voté pour cette question.', kind: 'err' };
+  } else if (result.data.code === 'code_invalide' || result.data.code === 'code_desactive') {
+    st.code = ''; persist();
+    st.message = { text: result.data.erreur, kind: 'err' };
+  } else {
+    st.message = { text: result.data.erreur || 'Erreur, réessayez.', kind: 'err' };
+  }
+  render();
+  refresh();
+}
+
+document.getElementById('changer').addEventListener('click', () => {
+  if (!confirm('Utiliser un autre code ? (par exemple pour voter avec une procuration)')) return;
+  st.code = ''; st.faits = []; st.choix = null; st.message = null; persist(); render();
+});
+
+// ---------- Affichage ----------
+function messageEl() {
+  return st.message ? h('div', { class: `msg ${st.message.kind}` }, st.message.text) : null;
+}
+
+function resultsEl(r) {
+  const total = r.nbVotes;
+  return h('div', { class: 'card' },
+    h('p', { class: 'small muted', style: 'margin-top:0' }, 'Résultat du dernier vote'),
+    h('h3', null, r.question),
+    r.options.map((o, i) => {
+      const n = r.resultats[i];
+      const pct = total ? Math.round((n / total) * 1000) / 10 : 0;
+      return h('div', null,
+        h('div', { class: 'row', style: 'justify-content:space-between' }, h('span', null, o), h('strong', null, `${n} · ${pct} %`)),
+        h('div', { class: 'bar' }, h('span', { style: `width:${pct}%` })));
+    }),
+    h('p', { class: 'small', style: 'margin-bottom:0' }, `${total} vote${total > 1 ? 's' : ''} exprimé${total > 1 ? 's' : ''}`));
+}
+
+let lastHtmlKey = '';
+function render() {
+  const key = JSON.stringify([st.code, st.faits, st.etat, st.choix, st.envoi, st.message, st.horsLigne, st.introuvable]);
+  if (key === lastHtmlKey) return;
+  // Ne pas effacer le code en cours de saisie
+  const typing = document.activeElement && document.activeElement.id === 'code' ? document.activeElement.value : null;
+  lastHtmlKey = key;
+
+  if (st.introuvable) {
+    document.getElementById('titre').textContent = 'Vote';
+    app.replaceChildren(h('p', { class: 'msg err' }, 'Ce lien de vote n\'existe pas ou a été supprimé.'));
+    return;
+  }
+  if (st.etat) document.getElementById('titre').textContent = st.etat.groupe;
+  document.title = st.etat ? `Vote — ${st.etat.groupe}` : 'Vote';
+
+  const pied = document.getElementById('pied');
+  pied.hidden = !st.code;
+  if (st.code) document.getElementById('codeInfo').textContent = `Code utilisé : ••••${st.code.slice(4)}`;
+
+  const offline = st.horsLigne ? h('p', { class: 'warn small' }, 'Connexion instable… la page réessaie toute seule.') : null;
+
+  // 1. Saisie du code
+  if (!st.code) {
+    const input = h('input', {
+      id: 'code', class: 'code-input mono', maxlength: 12, autocomplete: 'off', autocapitalize: 'characters',
+      spellcheck: 'false', inputmode: 'text', placeholder: 'XXXXXXXX', 'aria-label': 'Code de vote',
+    });
+    if (typing != null) input.value = typing;
+    const form = h('form', {
+      class: 'stack',
+      onsubmit: (e) => { e.preventDefault(); submitCode(input.value); },
+    },
+    h('p', { class: 'big' }, 'Entrez le code inscrit sur votre papier.'),
+    input,
+    h('button', { class: 'primary choice', type: 'submit', disabled: st.envoi, style: 'text-align:center' }, st.envoi ? 'Vérification…' : 'Valider'),
+    h('p', { class: 'muted small' }, 'Le code est anonyme : personne ne sait à qui il a été remis.'));
+    app.replaceChildren(...[messageEl(), form, offline].filter(Boolean));
+    if (typing != null || !st.message) input.focus();
+    return;
+  }
+
+  if (!st.etat) { app.replaceChildren(h('p', { class: 'muted' }, 'Chargement…'), offline || ''); return; }
+  const vote = st.etat.vote;
+
+  // 2. Aucun vote ouvert (avec les derniers résultats si partagés), ou déjà voté
+  if (!vote || st.faits.includes(vote.id)) {
+    app.replaceChildren(...[
+      messageEl(),
+      vote ? h('p', { class: 'muted' }, `Question en cours : ${vote.question}`) : null,
+      !vote && st.etat.resultat ? resultsEl(st.etat.resultat) : null,
+      h('p', { class: 'big' }, vote ? '✓ Vous avez voté pour cette question.' : 'Aucun vote en cours.'),
+      h('p', { class: 'muted' }, 'La prochaine question apparaîtra ici toute seule. Gardez cette page ouverte.'),
+      offline,
+    ].filter(Boolean));
+    return;
+  }
+
+  // 3. Confirmation
+  if (st.choix != null) {
+    app.replaceChildren(...[
+      h('p', { class: 'question' }, vote.question),
+      h('p', { class: 'big' }, 'Vous allez voter : ', h('strong', null, vote.options[st.choix])),
+      h('p', { class: 'muted small' }, 'Le vote est définitif.'),
+      h('button', { class: 'primary choice', style: 'text-align:center', disabled: st.envoi, onclick: submitVote },
+        st.envoi ? 'Envoi…' : 'Confirmer mon vote'),
+      h('button', { class: 'choice', style: 'text-align:center', disabled: st.envoi, onclick: () => { st.choix = null; render(); } }, 'Changer de réponse'),
+      offline,
+    ].filter(Boolean));
+    return;
+  }
+
+  // 4. Choix
+  app.replaceChildren(...[
+    st.message && st.message.kind === 'err' ? messageEl() : null,
+    h('p', { class: 'question' }, vote.question),
+    ...vote.options.map((o, i) => h('button', { class: 'choice', onclick: () => { st.choix = i; st.message = null; render(); } }, o)),
+    offline,
+  ].filter(Boolean));
+}
+
+render();
+refresh();
+</script>
+</body>
+</html>
