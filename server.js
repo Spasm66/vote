@@ -275,7 +275,9 @@ function pollView(p, withCounts) {
     id: p.id, question: p.question, options: p.options, statut: p.statut,
     nbVotes: p.nbVotes, creeLe: p.creeLe, ouvertLe: p.ouvertLe || null, closLe: p.closLe || null,
   };
-  if (withCounts) v.resultats = p.resultats;
+  // Le détail par réponse n'est jamais envoyé pendant un vote, même à l'admin :
+  // le voir bouger en direct permettrait de deviner le choix de quelqu'un qu'on regarde voter.
+  if (withCounts && p.statut === 'clos') v.resultats = p.resultats;
   return v;
 }
 function groupSummary(g) {
@@ -315,14 +317,17 @@ async function voterApi(req, res, url) {
   if (req.method !== 'POST') return fail(res, 405, 'methode', 'Méthode non autorisée.');
 
   const body = await readJson(req);
-  const ip = clientIp(req);
-  const b = bucket(`code:${ip}`, FENETRE_TENTATIVES);
-  if (b.count >= MAX_TENTATIVES_CODE) {
-    return fail(res, 429, 'trop_de_tentatives', 'Trop de codes erronés depuis ce réseau. Réessayez dans quelques minutes.');
-  }
   const code = normCode(body.code);
   const entry = g.codes[code];
   if (!entry) {
+    // Seuls les codes faux sont freinés. Un code valide passe toujours : sur le Wi-Fi de la
+    // fac, tout le monde partage la même adresse IP, et bloquer cette adresse empêcherait
+    // toute la salle de voter. Le freinage ne protège rien d'essentiel de toute façon :
+    // avec 31^8 ≈ 850 milliards de codes possibles, en deviner un est hors de portée.
+    const b = bucket(`code:${clientIp(req)}`, FENETRE_TENTATIVES);
+    if (b.count >= MAX_TENTATIVES_CODE) {
+      return fail(res, 429, 'trop_de_tentatives', 'Trop de codes erronés depuis ce réseau. Vérifiez votre code et réessayez dans quelques minutes.');
+    }
     b.count++;
     g.tentativesInvalides = (g.tentativesInvalides || 0) + 1;
     save();

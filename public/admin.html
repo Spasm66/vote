@@ -348,7 +348,7 @@ function fillGroup(g, parts) {
 function pollCard(v, g, anotherOpen) {
   const label = { ouvert: 'en cours', brouillon: 'prêt à lancer', clos: 'clos' }[v.statut];
   const total = v.nbVotes;
-  const showResults = v.statut !== 'brouillon';
+  const showResults = v.statut === 'clos'; // le détail n'existe qu'après la clôture
   const rows = v.options.map((o, i) => {
     if (!showResults) return h('li', null, o);
     const n = v.resultats[i];
@@ -369,7 +369,8 @@ function pollCard(v, g, anotherOpen) {
       h('span', { class: 'muted small' }, v.statut === 'clos' ? `clos le ${fmtDate(v.closLe)}` : v.statut === 'ouvert' ? `ouvert le ${fmtDate(v.ouvertLe)}` : '')),
     h('h3', { style: 'margin-top:8px' }, v.question),
     showResults ? h('div', null, rows) : h('ul', null, rows),
-    showResults ? h('p', null, h('strong', null, total), ` vote(s) sur ${g.nbCodes - g.nbDesactives} code(s) actifs`) : null,
+    v.statut !== 'brouillon' ? h('p', null, h('strong', null, total), ` vote(s) sur ${g.nbCodes - g.nbDesactives} code(s) actifs`) : null,
+    v.statut === 'ouvert' ? h('p', { class: 'muted small' }, 'Le détail par réponse s\'affichera à la clôture.') : null,
     h('div', { class: 'row' },
       v.statut === 'brouillon' ? h('button', { class: 'primary', disabled: anotherOpen, title: anotherOpen ? 'Un autre vote est en cours' : null, onclick: () => act('ouvrir') }, 'Lancer') : null,
       v.statut === 'ouvert' ? h('button', { class: 'primary', onclick: () => act('clore', 'Clôturer ce vote ? Plus personne ne pourra voter.') }, 'Clôturer le vote') : null,
